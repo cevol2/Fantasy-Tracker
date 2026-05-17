@@ -407,9 +407,13 @@ class YahooFantasyClient:
                                 player_data.update(prop)
                     elif isinstance(props_list, dict):
                         player_data.update(props_list)
-                    # Merge subresources
-                    if len(player_arr) > 1 and isinstance(player_arr[1], dict):
-                        player_data.update(player_arr[1])
+                    # Merge ALL subresources (ownership, player_stats, etc.)
+                    # With /ownership sub-resource, the array can have:
+                    #   index 1: {player_stats}
+                    #   index 2: {ownership}
+                    for i in range(1, len(player_arr)):
+                        if isinstance(player_arr[i], dict):
+                            player_data.update(player_arr[i])
                     all_players.append(player_data)
                     parsed_count += 1
                 
