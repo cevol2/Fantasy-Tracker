@@ -376,7 +376,7 @@ class YahooFantasyClient:
         start = 0
         
         while start < count:
-            url = f"{self.base_url}/league/{league_key}/players;status={status};start={start};count={page_size}/ownership?format=json"
+            url = f"{self.base_url}/league/{league_key}/players;status={status};start={start};count={page_size}/percent_owned?format=json"
             logger.info(f"Fetching players batch: start={start}, count={page_size}")
             data = self._make_request("GET", url)
             
@@ -414,11 +414,11 @@ class YahooFantasyClient:
                     for i in range(1, len(player_arr)):
                         if isinstance(player_arr[i], dict):
                             player_data.update(player_arr[i])
-                    # Debug: log first player's keys to understand data structure
+                    # Debug: log first player's data to verify percent_owned is present
                     if len(all_players) == 0:
                         logger.info(f"First player data keys: {list(player_data.keys())}")
-                        if "ownership" in player_data:
-                            logger.info(f"ownership type: {type(player_data['ownership']).__name__}, value: {str(player_data['ownership'])[:200]}")
+                        if "percent_owned" in player_data:
+                            logger.info(f"percent_owned type: {type(player_data['percent_owned']).__name__}, value: {str(player_data['percent_owned'])[:200]}")
                     all_players.append(player_data)
                     parsed_count += 1
                 
