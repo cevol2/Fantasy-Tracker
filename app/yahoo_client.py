@@ -362,52 +362,81 @@ class YahooFantasyClient:
           'W' - Waiver (players currently on waivers)
           'A' - All players
         
+        Yahoo API limits results to 25 per request, so we paginate using start.
+        
         Yahoo response format:
         fantasy_content.league = [
           {league_metadata},
           {players: {0: {player: [props, sub]}, count: N}}
         ]
         """
-        logger.info(f"Fetching {status} players for league: {league_key}")
-        url = f"{self.base_url}/league/{league_key}/players;status={status};count={count}?format=json"
-        data = self._make_request("GET", url)
-        
+        logger.info(f"Fetching {status} players for league: {league_key} (target: {count})")
         parsed_players = []
-        try:
-            fc = data.get("fantasy_content", {})
-            league_arr = fc.get("league", [])
-            if not isinstance(league_arr, list) or len(league_arr) < 2:
-                logger.warning(f"Unexpected league format for players: {type(league_arr)}")
-                return []
+        start = 0
+        max_iterations = 50  # Safety limit to prevent infinite loops
+        
+        iteration = 0
+        while len(parsed_players) < count and iteration < max_iterations:
+            iteration += 1
+            remaining = count - len(parsed_players)
+            request_count = min(25, remaining)  # Yahoo API caps at 25 per request
+            # Yahoo API uses semicolons for sub-resource filters before the query string
+            # Correct format: /league/{league_key}/players;status=FA;start=0;count=25?format=json
+            url = f"{self.base_url}/league/{league_key}/players;status={status};start={start};count={request_count}?format=json"
+            data = self._make_request("GET", url)
             
-            players_container = league_arr[1].get("players") if isinstance(league_arr[1], dict) else {}
-            if not isinstance(players_container, dict):
-                return []
-            
-            for pk in sorted(players_container.keys(), key=lambda x: (not str(x).isdigit(), int(x) if str(x).isdigit() else x)):
-                player_entry = players_container[pk]
-                if not isinstance(player_entry, dict) or "player" not in player_entry:
-                    continue
-                player_arr = player_entry["player"]
-                if not isinstance(player_arr, list) or len(player_arr) < 1:
-                    continue
-                props_list = player_arr[0]
-                player_data = {}
-                if isinstance(props_list, list):
-                    for prop in props_list:
-                        if isinstance(prop, dict):
-                            player_data.update(prop)
-                elif isinstance(props_list, dict):
-                    player_data.update(props_list)
-                # Merge subresources
-                if len(player_arr) > 1 and isinstance(player_arr[1], dict):
-                    player_data.update(player_arr[1])
-                parsed_players.append(player_data)
-        except Exception as e:
-            logger.warning(f"Error parsing league players: {e}")
+            batch = []
+            try:
+                fc = data.get("fantasy_content", {})
+                league_arr = fc.get("league", [])
+                if not isinstance(league_arr, list) or len(league_arr) < 2:
+                    logger.warning(f"Unexpected league format for players: {type(league_arr)}")
+                    break
+                
+                players_container = league_arr[1].get("players") if isinstance(league_arr[1], dict) else {}
+                if not isinstance(players_container, dict):
+                    break
+                
+                for pk in sorted(players_container.keys(), key=lambda x: (not str(x).isdigit(), int(x) if str(x).isdigit() else x)):
+                    player_entry = players_container[pk]
+                    if not isinstance(player_entry, dict) or "player" not in player_entry:
+                        continue
+                    player_arr = player_entry["player"]
+                    if not isinstance(player_arr, list) or len(player_arr) < 1:
+                        continue
+                    props_list = player_arr[0]
+                    player_data = {}
+                    if isinstance(props_list, list):
+                        for prop in props_list:
+                            if isinstance(prop, dict):
+                                player_data.update(prop)
+                    elif isinstance(props_list, dict):
+                        player_data.update(props_list)
+                    # Merge subresources
+                    if len(player_arr) > 1 and isinstance(player_arr[1], dict):
+                        player_data.update(player_arr[1])
+                    batch.append(player_data)
+                
+                if not batch:
+                    logger.info(f"No more players returned at start={start}, stopping pagination")
+                    break
+                
+                parsed_players.extend(batch)
+                logger.info(f"Fetched {len(batch)} players at offset {start} (total so far: {len(parsed_players)})")
+                
+                start += len(batch)
+                
+                # Stop if we got fewer players than requested (end of list)
+                if len(batch) < request_count:
+                    logger.info(f"Got fewer players ({len(batch)}) than requested ({request_count}), stopping")
+                    break
+                    
+            except Exception as e:
+                logger.warning(f"Error parsing league players at start={start}: {e}")
+                break
         
         logger.info(f"Retrieved {len(parsed_players)} available players for league {league_key}")
-        return parsed_players
+        return parsed_players[:count]
     
     @staticmethod
     def _game_key_to_season(game_key: str) -> int:
