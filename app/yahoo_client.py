@@ -355,9 +355,7 @@ class YahooFantasyClient:
 
     def get_league_players(self, league_key: str, status: str = "FA", count: int = 200) -> list[dict]:
         """
-        Get available/waiver players for a league using pagination.
-        Yahoo API caps count at 25 per request, so this makes multiple
-        requests using the start parameter to fetch up to `count` players.
+        Get available/waiver players for a league.
         
         Status filters (Yahoo API valid values):
           'FA' - Free Agents (unowned players available to pick up)
@@ -370,71 +368,46 @@ class YahooFantasyClient:
           {players: {0: {player: [props, sub]}, count: N}}
         ]
         """
-        logger.info(f"Fetching {status} players for league: {league_key}, target count: {count}")
-        all_players = []
-        page_size = 25
-        start = 0
+        logger.info(f"Fetching {status} players for league: {league_key}")
+        url = f"{self.base_url}/league/{league_key}/players;status={status};count={count}?format=json"
+        data = self._make_request("GET", url)
         
-        while start < count:
-            url = f"{self.base_url}/league/{league_key}/players;status={status};start={start};count={page_size}/percent_owned?format=json"
-            logger.info(f"Fetching players batch: start={start}, count={page_size}")
-            data = self._make_request("GET", url)
+        parsed_players = []
+        try:
+            fc = data.get("fantasy_content", {})
+            league_arr = fc.get("league", [])
+            if not isinstance(league_arr, list) or len(league_arr) < 2:
+                logger.warning(f"Unexpected league format for players: {type(league_arr)}")
+                return []
             
-            try:
-                fc = data.get("fantasy_content", {})
-                league_arr = fc.get("league", [])
-                if not isinstance(league_arr, list) or len(league_arr) < 2:
-                    logger.warning(f"Unexpected league format for players: {type(league_arr)}")
-                    break
-                
-                players_container = league_arr[1].get("players") if isinstance(league_arr[1], dict) else {}
-                if not isinstance(players_container, dict):
-                    break
-                
-                parsed_count = 0
-                for pk in sorted(players_container.keys(), key=lambda x: (not str(x).isdigit(), int(x) if str(x).isdigit() else x)):
-                    player_entry = players_container[pk]
-                    if not isinstance(player_entry, dict) or "player" not in player_entry:
-                        continue
-                    player_arr = player_entry["player"]
-                    if not isinstance(player_arr, list) or len(player_arr) < 1:
-                        continue
-                    props_list = player_arr[0]
-                    player_data = {}
-                    if isinstance(props_list, list):
-                        for prop in props_list:
-                            if isinstance(prop, dict):
-                                player_data.update(prop)
-                    elif isinstance(props_list, dict):
-                        player_data.update(props_list)
-                    # Merge ALL subresources (ownership, player_stats, etc.)
-                    # With /ownership sub-resource, the array can have:
-                    #   index 1: {player_stats}
-                    #   index 2: {ownership}
-                    for i in range(1, len(player_arr)):
-                        if isinstance(player_arr[i], dict):
-                            player_data.update(player_arr[i])
-                    # Debug: log first player's data to verify percent_owned is present
-                    if len(all_players) == 0:
-                        logger.info(f"First player data keys: {list(player_data.keys())}")
-                        if "percent_owned" in player_data:
-                            logger.info(f"percent_owned type: {type(player_data['percent_owned']).__name__}, value: {str(player_data['percent_owned'])[:200]}")
-                    all_players.append(player_data)
-                    parsed_count += 1
-                
-                # If we got fewer players than requested, we've hit the end
-                if parsed_count < page_size:
-                    logger.info(f"Got {parsed_count} players in final batch (fewer than {page_size})")
-                    break
-                    
-            except Exception as e:
-                logger.warning(f"Error parsing league players batch at start={start}: {e}")
-                break
+            players_container = league_arr[1].get("players") if isinstance(league_arr[1], dict) else {}
+            if not isinstance(players_container, dict):
+                return []
             
-            start += page_size
+            for pk in sorted(players_container.keys(), key=lambda x: (not str(x).isdigit(), int(x) if str(x).isdigit() else x)):
+                player_entry = players_container[pk]
+                if not isinstance(player_entry, dict) or "player" not in player_entry:
+                    continue
+                player_arr = player_entry["player"]
+                if not isinstance(player_arr, list) or len(player_arr) < 1:
+                    continue
+                props_list = player_arr[0]
+                player_data = {}
+                if isinstance(props_list, list):
+                    for prop in props_list:
+                        if isinstance(prop, dict):
+                            player_data.update(prop)
+                elif isinstance(props_list, dict):
+                    player_data.update(props_list)
+                # Merge subresources
+                if len(player_arr) > 1 and isinstance(player_arr[1], dict):
+                    player_data.update(player_arr[1])
+                parsed_players.append(player_data)
+        except Exception as e:
+            logger.warning(f"Error parsing league players: {e}")
         
-        logger.info(f"Retrieved {len(all_players)} available players for league {league_key} (paginated)")
-        return all_players
+        logger.info(f"Retrieved {len(parsed_players)} available players for league {league_key}")
+        return parsed_players
     
     @staticmethod
     def _game_key_to_season(game_key: str) -> int:
