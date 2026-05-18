@@ -76,6 +76,24 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optiona
     return get_user_by_id(db, user_id)
 
 
+# Stat name mapping
+CAT_NAMES = {
+    "7": "R", "12": "HR", "13": "RBI", "16": "SB",
+    "4": "AVG", "5": "OBP", "3": "BA", "55": "OPS",
+    "50": "IP", "26": "ERA", "27": "WHIP",
+    "57": "K", "83": "SV", "89": "HLD",
+    "28": "W", "32": "QS", "22": "K"
+}
+
+# Which stat IDs are batting vs pitching
+BATTING_STATS = {"7", "12", "13", "16", "4", "5", "3", "55", "22"}
+PITCHING_STATS = {"50", "26", "27", "57", "83", "89", "28", "32"}
+
+# Preferred display order
+BATTING_ORDER = ["12", "7", "13", "16", "4", "55", "3", "5", "22"]
+PITCHING_ORDER = ["28", "57", "50", "26", "27", "83", "89", "32"]
+
+
 # Routes
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request, db: Session = Depends(get_db)):
@@ -765,6 +783,18 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
                 border-radius: 5px;
                 font-size: 14px;
             }
+            .btn-purple {
+                background: #7c3aed;
+                color: white;
+                text-decoration: none;
+                padding: 8px 16px;
+                border-radius: 5px;
+                font-size: 14px;
+                border: none;
+                cursor: pointer;
+                display: inline-block;
+            }
+            .btn-purple:hover { background: #6d28d9; }
             .info { color: #888; font-size: 14px; }
             table {
                 width: 100%;
@@ -779,6 +809,85 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
             th { color: #888; }
             .roster-table { margin-top: 20px; }
             .standings-table { margin-top: 20px; }
+            
+            /* Modal styles */
+            .modal-overlay {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0,0,0,0.7);
+                z-index: 1000;
+                align-items: center;
+                justify-content: center;
+            }
+            .modal-overlay.active {
+                display: flex;
+            }
+            .modal-content {
+                background: #1a1a2e;
+                border: 1px solid #333;
+                border-radius: 12px;
+                max-width: 900px;
+                width: 90%;
+                max-height: 85vh;
+                overflow-y: auto;
+                padding: 24px;
+                position: relative;
+            }
+            .modal-close {
+                position: absolute;
+                top: 12px;
+                right: 16px;
+                background: none;
+                border: none;
+                color: #888;
+                font-size: 24px;
+                cursor: pointer;
+            }
+            .modal-close:hover { color: #e94560; }
+            .modal-title { color: #e94560; margin-top: 0; }
+            .totals-section {
+                margin: 20px 0;
+            }
+            .totals-section h3 {
+                color: #fbbf24;
+                border-bottom: 1px solid #333;
+                padding-bottom: 8px;
+            }
+            .totals-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 14px;
+            }
+            .totals-table th {
+                background: #0f3460;
+                padding: 10px 12px;
+                text-align: left;
+                color: #888;
+                font-weight: bold;
+            }
+            .totals-table td {
+                padding: 8px 12px;
+                border-bottom: 1px solid #222;
+            }
+            .totals-table tr:hover td {
+                background: rgba(15, 52, 96, 0.3);
+            }
+            .loading-spinner {
+                text-align: center;
+                padding: 40px;
+                color: #888;
+            }
+            .error-msg {
+                color: #e94560;
+                padding: 20px;
+                text-align: center;
+            }
+            .stat-total { font-weight: bold; color: #eee; }
+            .stat-label { color: #888; }
         </style>
     </head>
     <body>
@@ -815,14 +924,86 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
                 <button onclick="loadLeagueInfo('{league.league_key}')" class="btn">View Details</button>
                 <a href="/league/{league.league_key}/teams" class="btn">👥 View Teams</a>
                 <a href="/sync/standings/{league.league_key}" class="btn">Standings</a>
+                <button onclick="loadPlayerTotals('{league.league_key}')" class="btn-purple">📊 Player Totals</button>
             </div>
             """
         html += '</div>'
     
+    # Modal overlay for player totals
     html += """
+        <div id="totals-modal" class="modal-overlay" onclick="closeModal(event)">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+                <h2 class="modal-title" id="totals-modal-title">League Player Totals</h2>
+                <div id="totals-content">
+                    <div class="loading-spinner">Loading totals...</div>
+                </div>
+            </div>
+        </div>
+        
         <div id="league-details" style="display:none;"></div>
         
         <script>
+        function closeModal(event) {
+            if (!event || event.target === document.getElementById('totals-modal')) {
+                document.getElementById('totals-modal').classList.remove('active');
+            }
+        }
+        
+        function loadPlayerTotals(leagueKey) {
+            const modal = document.getElementById('totals-modal');
+            const content = document.getElementById('totals-content');
+            const title = document.getElementById('totals-modal-title');
+            
+            modal.classList.add('active');
+            title.textContent = 'League Player Totals';
+            content.innerHTML = '<div class="loading-spinner">⏳ Loading league totals...</div>';
+            
+            fetch('/api/league/' + encodeURIComponent(leagueKey) + '/player_totals')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        content.innerHTML = '<div class="error-msg">❌ ' + data.error + '</div>';
+                        return;
+                    }
+                    
+                    title.textContent = '📊 ' + data.league_name + ' - Player Totals';
+                    
+                    let html = '<div class="totals-section">';
+                    
+                    // Batting table
+                    html += '<h3>🟢 Batting Totals</h3>';
+                    html += '<table class="totals-table"><tr>';
+                    for (let label of data.batting.labels) {
+                        html += '<th>' + label + '</th>';
+                    }
+                    html += '</tr><tr>';
+                    for (let val of data.batting.values) {
+                        html += '<td class="stat-total">' + val + '</td>';
+                    }
+                    html += '</tr></table>';
+                    
+                    // Pitching table
+                    html += '<h3 style="margin-top: 24px;">🔴 Pitching Totals</h3>';
+                    html += '<table class="totals-table"><tr>';
+                    for (let label of data.pitching.labels) {
+                        html += '<th>' + label + '</th>';
+                    }
+                    html += '</tr><tr>';
+                    for (let val of data.pitching.values) {
+                        html += '<td class="stat-total">' + val + '</td>';
+                    }
+                    html += '</tr></table>';
+                    
+                    html += '<p style="color:#666;font-size:12px;margin-top:16px;">Aggregated team stats across all ' + data.team_count + ' teams</p>';
+                    
+                    content.innerHTML = html;
+                })
+                .catch(err => {
+                    content.innerHTML = '<div class="error-msg">❌ Failed to load totals: ' + err.message + '</div>';
+                });
+        }
+        
         function loadLeagueInfo(leagueKey) {
             fetch('/api/league/' + encodeURIComponent(leagueKey))
                 .then(r => r.json())
@@ -1063,6 +1244,7 @@ async def view_all_standings(request: Request, db: Session = Depends(get_db)):
                 text-decoration: none;
                 padding: 8px 16px;
                 border-radius: 5px;
+                font-size: 14px;
             }
             .header {
                 display: flex;
@@ -1114,15 +1296,6 @@ async def view_all_standings(request: Request, db: Session = Depends(get_db)):
                 elif total and float(total) == 0 and t.get("league_scoring_type") == "head":
                     is_category_league = True
             
-            # Stat name mapping for category leagues
-            cat_names = {
-                "7": "R", "12": "HR", "13": "RBI", "16": "SB",
-                "4": "AVG", "5": "OBP", "3": "BA", "55": "OPS",
-                "50": "IP", "26": "ERA", "27": "WHIP",
-                "57": "K", "83": "SV", "89": "HLD",
-                "28": "W", "32": "QS", "22": "K"
-            }
-            
             if is_category_league:
                 # Collect all stat categories present
                 stat_ids = []
@@ -1138,7 +1311,7 @@ async def view_all_standings(request: Request, db: Session = Depends(get_db)):
                 # Add extra stat columns
                 html += '<tr><th>Rk</th><th>Team</th>'
                 for sid in stat_ids:
-                    name = cat_names.get(sid, sid)
+                    name = CAT_NAMES.get(sid, sid)
                     html += f'<th>{name}</th>'
                 html += '</tr>'
                 
@@ -1456,15 +1629,6 @@ async def sync_standings(league_key: str, request: Request, db: Session = Depend
             if total and float(total) == 0 and t.get("league_scoring_type") == "head":
                 is_category_league = True
         
-        # Stat name mapping for category leagues
-        cat_names = {
-            "7": "R", "12": "HR", "13": "RBI", "16": "SB",
-            "4": "AVG", "5": "OBP", "3": "BA", "55": "OPS",
-            "50": "IP", "26": "ERA", "27": "WHIP",
-            "57": "K", "83": "SV", "89": "HLD",
-            "28": "W", "32": "QS", "22": "K"
-        }
-        
         html = """
         <!DOCTYPE html>
         <html>
@@ -1514,7 +1678,7 @@ async def sync_standings(league_key: str, request: Request, db: Session = Depend
             
             html += """<div style="overflow-x: auto;"><table><tr><th>Rk</th><th>Team</th>"""
             for sid in stat_ids:
-                name = cat_names.get(sid, sid)
+                name = CAT_NAMES.get(sid, sid)
                 html += f'<th>{name}</th>'
             html += '</tr>'
             
@@ -1625,6 +1789,124 @@ async def api_league(league_key: str, request: Request, db: Session = Depends(ge
         raise HTTPException(status_code=404, detail="League not found")
     
     return league.to_dict()
+
+
+@app.get("/api/league/{league_key}/player_totals")
+async def api_league_player_totals(league_key: str, request: Request, db: Session = Depends(get_db)):
+    """
+    Get aggregate batting and pitching totals for all teams in a league.
+    
+    Aggregates team_stats from all teams in the league standings to show
+    overall league-wide production broken down by batting and pitching categories.
+    """
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    
+    try:
+        client = YahooFantasyClient(user, db)
+        
+        # Get or sync league
+        league = db.query(League).filter(League.league_key == league_key).first()
+        if not league:
+            client.sync_leagues()
+            league = db.query(League).filter(League.league_key == league_key).first()
+        
+        if not league:
+            raise HTTPException(status_code=404, detail="League not found")
+        
+        # Sync standings to get fresh data
+        standings = client.sync_standings(league)
+        teams = standings.standings_data if isinstance(standings.standings_data, list) else [standings.standings_data]
+        
+        if not teams:
+            return {"error": "No standings data available. Sync the league first."}
+        
+        # Aggregate stats across all teams
+        batting_totals = {}
+        pitching_totals = {}
+        
+        for team_data in teams:
+            ts = team_data.get("team_stats", {})
+            if not isinstance(ts, dict):
+                continue
+            
+            stats_arr = ts.get("stats", [])
+            if not isinstance(stats_arr, list):
+                continue
+            
+            for entry in stats_arr:
+                if not isinstance(entry, dict):
+                    continue
+                stat_obj = entry.get("stat", {})
+                if not isinstance(stat_obj, dict):
+                    continue
+                
+                stat_id = stat_obj.get("stat_id", "")
+                value = stat_obj.get("value", "0")
+                
+                if not stat_id or not value:
+                    continue
+                
+                # Skip rate stats for simple sums - they need special handling
+                # AVG (4, 3), OBP (5), OPS (55), ERA (26), WHIP (27)
+                if stat_id in ("4", "3", "5", "55", "26", "27"):
+                    continue
+                
+                try:
+                    num_val = float(value)
+                except (ValueError, TypeError):
+                    continue
+                
+                if stat_id in BATTING_STATS:
+                    batting_totals[stat_id] = batting_totals.get(stat_id, 0.0) + num_val
+                elif stat_id in PITCHING_STATS:
+                    pitching_totals[stat_id] = pitching_totals.get(stat_id, 0.0) + num_val
+        
+        # Build ordered lists for batting
+        batting_labels = []
+        batting_values = []
+        for sid in BATTING_ORDER:
+            if sid in batting_totals:
+                label = CAT_NAMES.get(sid, sid)
+                val = batting_totals[sid]
+                if sid == "50":  # IP - format as X.X
+                    batting_labels.append(label)
+                    batting_values.append(f"{val:.1f}")
+                else:
+                    batting_labels.append(label)
+                    batting_values.append(f"{int(val)}")
+        
+        # Build ordered lists for pitching
+        pitching_labels = []
+        pitching_values = []
+        for sid in PITCHING_ORDER:
+            if sid in pitching_totals:
+                label = CAT_NAMES.get(sid, sid)
+                val = pitching_totals[sid]
+                if sid == "50":  # IP
+                    pitching_labels.append(label)
+                    pitching_values.append(f"{val:.1f}")
+                else:
+                    pitching_labels.append(label)
+                    pitching_values.append(f"{int(val)}")
+        
+        return {
+            "league_name": league.name,
+            "team_count": len(teams),
+            "batting": {
+                "labels": batting_labels,
+                "values": batting_values
+            },
+            "pitching": {
+                "labels": pitching_labels,
+                "values": pitching_values
+            }
+        }
+        
+    except Exception as e:
+        logger.exception(f"Player totals error: {e}")
+        return {"error": str(e)}
 
 
 @app.get("/api/teams")
